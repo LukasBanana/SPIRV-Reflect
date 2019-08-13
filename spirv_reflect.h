@@ -287,6 +287,10 @@ typedef struct SpvReflectInterfaceVariable {
 
   SpvReflectFormat                    format;
 
+  // List of variables that are used in conjunction with this variable (used for samplers that are used with one or more images)
+  uint32_t                            sampled_image_count;
+  struct SpvReflectInterfaceVariable**sampled_image_refs;
+
   // NOTE: SPIR-V shares type references for variables
   //       that have the same underlying type. This means
   //       that the same type name will appear for multiple

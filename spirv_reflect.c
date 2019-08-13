@@ -125,6 +125,13 @@ typedef struct Decorations {
 // clang-format on
 
 // clang-format off
+typedef struct SampledImage {
+  uint32_t              image;
+  uint32_t              sampler;
+} SampledImage;
+// clang-format on
+
+// clang-format off
 typedef struct Node {
   uint32_t              result_id;
   SpvOp                 op;
@@ -138,6 +145,8 @@ typedef struct Node {
   ArrayTraits           array_traits;
   ImageTraits           image_traits;
   uint32_t              image_type_id;
+  SampledImage          sampled_image;
+  uint32_t              pointer_id;
 
   const char*           name;
   Decorations           decorations;
@@ -475,11 +484,26 @@ static void ApplyArrayTraits(const SpvReflectTypeDescription* p_type, SpvReflect
   memcpy(p_array_traits, &p_type->traits.array, sizeof(p_type->traits.array));
 }
 
+// Returns the first Node with the specified <result_id> searching from the beginning
 static Node* FindNode(Parser* p_parser, uint32_t result_id)
 {
   Node* p_node = NULL;
   for (size_t i = 0; i < p_parser->node_count; ++i) {
     Node* p_elem = &(p_parser->nodes[i]);
+    if (p_elem->result_id == result_id) {
+      p_node = p_elem;
+      break;
+    }
+  }
+  return p_node;
+}
+
+// Returns the first Node with the specified <result_id> searching backwards from the current node index, i.e. in the half-open range [0, node_index_end)
+static Node* FindPreviousNode(Parser* p_parser, uint32_t result_id, uint32_t node_index_end)
+{
+  Node* p_node = NULL;
+  for (size_t i = node_index_end; i > 0; --i) {
+    Node* p_elem = &(p_parser->nodes[i - 1]);
     if (p_elem->result_id == result_id) {
       p_node = p_elem;
       break;
@@ -556,6 +580,27 @@ static void DestroyParser(Parser* p_parser)
     SafeFree(p_parser->access_chains);
     p_parser->node_count = 0;
   }
+}
+
+// Returns the result ID of an OpVariable instruction the specified OpLoad instruction (node_index) refers to
+static Node* FetchOpVariableFromOpLoad(Parser* p_parser, uint32_t node_index_end, uint32_t loadop_id, SpvOp variable_type)
+{
+  Node* p_node_opload = FindPreviousNode(p_parser, loadop_id, node_index_end);
+  if (p_node_opload == NULL || p_node_opload->op != SpvOpLoad) {
+    return NULL;
+  }
+
+  Node* p_node_result_type = FindNode(p_parser, p_node_opload->result_type_id);
+  if (p_node_result_type == NULL || p_node_result_type->op != variable_type) {
+    return NULL;
+  }
+
+  Node* p_node_result = FindNode(p_parser, p_node_opload->pointer_id);
+  if (p_node_result == NULL || p_node_result->op != SpvOpVariable) {
+    return NULL;
+  }
+
+  return p_node_result;
 }
 
 static SpvReflectResult ParseNodes(Parser* p_parser)
@@ -771,6 +816,7 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
         // Only load enough so OpDecorate can reference the node, skip the remaining operands.
         CHECKED_READU32(p_parser, p_node->word_offset + 1, p_node->result_type_id);
         CHECKED_READU32(p_parser, p_node->word_offset + 2, p_node->result_id);
+        CHECKED_READU32(p_parser, p_node->word_offset + 3, p_node->pointer_id);
       }
       break;
 
@@ -808,6 +854,30 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
           }
         }
         ++access_chain_index;
+      }
+      break;
+
+      case SpvOpSampledImage:
+      {
+        // Gather information of which samplers are used in conjunction with which images
+        CHECKED_READU32(p_parser, p_node->word_offset + 1, p_node->result_type_id);
+        CHECKED_READU32(p_parser, p_node->word_offset + 2, p_node->result_id);
+        CHECKED_READU32(p_parser, p_node->word_offset + 3, p_node->sampled_image.image);
+        CHECKED_READU32(p_parser, p_node->word_offset + 4, p_node->sampled_image.sampler);
+
+        Node* p_image_var = FetchOpVariableFromOpLoad(p_parser, node_index, p_node->sampled_image.image, SpvOpTypeImage);
+        if (p_image_var != NULL) {
+          p_node->sampled_image.image = p_image_var->result_id;
+        } else {
+          p_node->sampled_image.image = 0;
+        }
+
+        Node* p_sampler_var = FetchOpVariableFromOpLoad(p_parser, node_index, p_node->sampled_image.sampler, SpvOpTypeSampler);
+        if (p_sampler_var != NULL) {
+          p_node->sampled_image.sampler = p_sampler_var->result_id;
+        } else {
+          p_node->sampled_image.sampler = 0;
+        }
       }
       break;
 
