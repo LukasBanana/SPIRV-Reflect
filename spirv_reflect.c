@@ -145,7 +145,6 @@ typedef struct Node {
   ArrayTraits           array_traits;
   ImageTraits           image_traits;
   uint32_t              image_type_id;
-  SampledImage          sampled_image;
   uint32_t              pointer_id;
 
   const char*           name;
@@ -209,10 +208,14 @@ typedef struct Parser {
   Function*             functions;
   uint32_t              access_chain_count;
   AccessChain*          access_chains;
+  uint32_t              sampled_image_count;
+  SampledImage*         sampled_images;
 
   uint32_t              type_count;
   uint32_t              descriptor_count;
   uint32_t              push_constant_count;
+  uint32_t              image_count;
+  uint32_t              sampler_count;
 } Parser;
 // clang-format on
 
@@ -613,6 +616,7 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
 
   // Count nodes
   uint32_t node_count = 0;
+  uint32_t sampled_image_count = 0;
   while (spirv_word_index < p_parser->spirv_word_count) {
     uint32_t word = p_spirv[spirv_word_index];
     SpvOp op = (SpvOp)(word & 0xFFFF);
@@ -622,6 +626,9 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
     }
     if (op == SpvOpAccessChain) {
       ++(p_parser->access_chain_count);
+    }
+    if (op == SpvOpSampledImage) {
+      ++sampled_image_count;
     }
     spirv_word_index += node_word_count;
     ++node_count;
@@ -637,6 +644,7 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
   if (IsNull(p_parser->nodes)) {
     return SPV_REFLECT_RESULT_ERROR_ALLOC_FAILED;
   }
+
   // Mark all nodes with an invalid state
   for (uint32_t i = 0; i < node_count; ++i) {
     p_parser->nodes[i].op = (SpvOp)INVALID_VALUE;
@@ -648,6 +656,7 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
     p_parser->nodes[i].decorations.uav_counter_buffer.value = (uint32_t)INVALID_VALUE;
     p_parser->nodes[i].decorations.built_in = (SpvBuiltIn)INVALID_VALUE;
   }
+
   // Mark source file id node
   p_parser->source_file_id = (uint32_t)INVALID_VALUE;
 
@@ -662,9 +671,16 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
     }
   }
 
+  // Allocate sampled images
+  if (sampled_image_count > 0) {
+    p_parser->sampled_images = (SampledImage*)calloc(sampled_image_count, sizeof(SampledImage));
+    memset(p_parser->sampled_images, 0, sizeof(SampledImage) * sampled_image_count);
+  }
+
   // Parse nodes
   uint32_t node_index = 0;
   uint32_t access_chain_index = 0;
+  uint32_t sampled_image_index = 0;
   spirv_word_index = SPIRV_STARTING_WORD_INDEX;
   while (spirv_word_index < p_parser->spirv_word_count) {
     uint32_t word = p_spirv[spirv_word_index];
@@ -859,24 +875,40 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
 
       case SpvOpSampledImage:
       {
+        SampledImage* p_sampled_image = &(p_parser->sampled_images[sampled_image_index]);
+
         // Gather information of which samplers are used in conjunction with which images
         CHECKED_READU32(p_parser, p_node->word_offset + 1, p_node->result_type_id);
         CHECKED_READU32(p_parser, p_node->word_offset + 2, p_node->result_id);
-        CHECKED_READU32(p_parser, p_node->word_offset + 3, p_node->sampled_image.image);
-        CHECKED_READU32(p_parser, p_node->word_offset + 4, p_node->sampled_image.sampler);
+        CHECKED_READU32(p_parser, p_node->word_offset + 3, p_sampled_image->image);
+        CHECKED_READU32(p_parser, p_node->word_offset + 4, p_sampled_image->sampler);
 
-        Node* p_image_var = FetchOpVariableFromOpLoad(p_parser, node_index, p_node->sampled_image.image, SpvOpTypeImage);
+        Node* p_image_var = FetchOpVariableFromOpLoad(p_parser, node_index, p_sampled_image->image, SpvOpTypeImage);
         if (p_image_var != NULL) {
-          p_node->sampled_image.image = p_image_var->result_id;
+          p_sampled_image->image = p_image_var->result_id;
         } else {
-          p_node->sampled_image.image = 0;
+          p_sampled_image->image = 0;
         }
 
-        Node* p_sampler_var = FetchOpVariableFromOpLoad(p_parser, node_index, p_node->sampled_image.sampler, SpvOpTypeSampler);
+        Node* p_sampler_var = FetchOpVariableFromOpLoad(p_parser, node_index, p_sampled_image->sampler, SpvOpTypeSampler);
         if (p_sampler_var != NULL) {
-          p_node->sampled_image.sampler = p_sampler_var->result_id;
+          p_sampled_image->sampler = p_sampler_var->result_id;
         } else {
-          p_node->sampled_image.sampler = 0;
+          p_sampled_image->sampler = 0;
+        }
+
+        // Only increase index if this sampler-image combination does not exist yet
+        int sampled_image_registered = 0;
+        for (uint32_t i = 0; i < sampled_image_index; ++i) {
+          if (p_parser->sampled_images[i].image == p_sampled_image->image &&
+              p_parser->sampled_images[i].sampler == p_sampled_image->sampler)
+          {
+            sampled_image_registered = 1;
+            break;
+          }
+        }
+        if (sampled_image_registered == 0) {
+          ++sampled_image_index;
         }
       }
       break;
@@ -911,6 +943,8 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
     if (p_node->is_type) {
       ++(p_parser->type_count);
     }
+
+    p_parser->sampled_image_count = sampled_image_index;
 
     spirv_word_index += node_word_count;
     ++node_index;
@@ -1589,11 +1623,13 @@ static SpvReflectResult ParseType(
         IF_READU32(result, p_parser, p_node->word_offset + 6, p_type->traits.image.ms);
         IF_READU32(result, p_parser, p_node->word_offset + 7, p_type->traits.image.sampled);
         IF_READU32_CAST(result, p_parser, p_node->word_offset + 8, SpvImageFormat, p_type->traits.image.image_format);
+        p_parser->image_count++;
       }
       break;
 
       case SpvOpTypeSampler: {
         p_type->type_flags |= SPV_REFLECT_TYPE_FLAG_EXTERNAL_SAMPLER;
+        p_parser->sampler_count++;
       }
       break;
 
@@ -1765,6 +1801,105 @@ static SpvReflectResult ParseTypes(Parser* p_parser, SpvReflectShaderModule* p_m
     }
     ++type_index;
   }
+  return SPV_REFLECT_RESULT_SUCCESS;
+}
+
+typedef struct BindingAssociation BindingAssociation;
+
+static SpvReflectDescriptorBinding* FindDescriptorBinding(SpvReflectShaderModule* p_module, uint32_t spirv_id) {
+  for (size_t i = 0; i < p_module->descriptor_binding_count; ++i) {
+    SpvReflectDescriptorBinding* binding = &(p_module->descriptor_bindings[i]);
+    if (binding->spirv_id == spirv_id) {
+      return binding;
+    }
+  }
+  return NULL;
+}
+
+static SpvReflectResult ParseSamplerImageUsage(Parser* p_parser, SpvReflectShaderModule* p_module)
+{
+  // Allocate container for binding associations
+  BindingAssociation* associations = NULL;
+  size_t association_count = 0;
+  const size_t max_association_count = p_parser->sampler_count;
+  
+  p_module->_internal->binding_association_count = 0;
+  
+  if (max_association_count > 0) {
+    associations = (BindingAssociation*)calloc(max_association_count, sizeof(BindingAssociation));
+    memset(associations, 0, sizeof(BindingAssociation) * max_association_count);
+    p_module->_internal->binding_associations = associations;
+  } else {
+    p_module->_internal->binding_associations = NULL;
+    return SPV_REFLECT_RESULT_SUCCESS;
+  }
+  
+  // Fetch resources that need binding associations
+  for (size_t i = 0; i < p_parser->sampled_image_count; ++i) {
+    const SampledImage* p_sampled_image = &(p_parser->sampled_images[i]);
+    if (p_sampled_image->image == 0 || p_sampled_image->sampler == 0) {
+      continue;
+    }
+
+    // Find entry for sampler in associations container
+    BindingAssociation* assoc = NULL;
+    for (size_t j = 0; j < association_count; ++j) {
+      if (associations[j].resource != NULL &&
+        associations[j].resource->spirv_id == p_sampled_image->sampler)
+      {
+        assoc = &associations[j];
+        assoc->usage_binding_count++;
+        break;
+      }
+    }
+    if (assoc == NULL) {
+      // Otherwise, use next available assocations
+      assoc = &associations[association_count++];
+        
+      // Initialize association
+      assoc->resource = NULL;
+      assoc->usage_binding_count = 0;
+
+      // Find sampler resource 
+      SpvReflectDescriptorBinding* binding = FindDescriptorBinding(p_module, p_sampled_image->sampler);
+      if (binding != NULL) {
+        assoc->resource = binding;
+        assoc->usage_binding_count++;
+      }
+    }
+  }
+  
+  // Allocate usage binding container
+  p_module->_internal->usage_bindings = (SpvReflectDescriptorBinding**)calloc(p_parser->sampled_image_count, sizeof(SpvReflectDescriptorBinding*));
+  SpvReflectDescriptorBinding** p_usage_bindings = p_module->_internal->usage_bindings;
+
+  for (size_t i = 0; i < association_count; ++i) {
+    BindingAssociation* assoc = &(associations[i]);
+    if (assoc->resource == NULL) {
+      continue;
+    }
+
+    // Store references to usage binding container
+    assoc->resource->usage_bindings = p_usage_bindings;
+    assoc->resource->usage_binding_count = 0;
+
+    // Build final sampler-to-texture associations
+    for (size_t j = 0; j < p_parser->sampled_image_count; ++j) {
+      SampledImage* p_sampled_image = &(p_parser->sampled_images[j]);
+      if (p_sampled_image->sampler == assoc->resource->spirv_id) {
+        SpvReflectDescriptorBinding* binding = FindDescriptorBinding(p_module, p_sampled_image->image);
+        if (binding != NULL) {
+          *p_usage_bindings = binding;
+          assoc->resource->usage_binding_count++;
+          p_usage_bindings++;
+        }
+      }
+    }
+  }
+  
+  // Store final number of associations
+  p_module->_internal->binding_association_count = association_count;
+  
   return SPV_REFLECT_RESULT_SUCCESS;
 }
 
@@ -3206,13 +3341,14 @@ SpvReflectResult spvReflectGetShaderModule(
   SpvReflectShaderModule*  p_module
 )
 {
-  return spvReflectCreateShaderModule(size, p_code, p_module);
+  return spvReflectCreateShaderModule(size, p_code, p_module, 0);
 }
 
 SpvReflectResult spvReflectCreateShaderModule(
   size_t                   size,
   const void*              p_code,
-  SpvReflectShaderModule*  p_module
+  SpvReflectShaderModule*  p_module,
+  SpvReflectReturnFlags    flags
 )
 {
   // Initialize all module fields to zero
@@ -3320,6 +3456,9 @@ SpvReflectResult spvReflectCreateShaderModule(
   }
   if (result == SPV_REFLECT_RESULT_SUCCESS) {
     result = SynchronizeDescriptorSets(p_module);
+  }
+  if (result == SPV_REFLECT_RESULT_SUCCESS && (flags & SPV_REFLECT_RETURN_FLAG_SAMPLER_IMAGE_USAGE) != 0) {
+    result = ParseSamplerImageUsage(&parser, p_module);
   }
 
   // Destroy module if parse was not successful
@@ -3437,6 +3576,10 @@ void spvReflectDestroyShaderModule(SpvReflectShaderModule* p_module)
     SafeFree(p_type->members);
   }
   SafeFree(p_module->_internal->type_descriptions);
+
+  // Usage bindings
+  SafeFree(p_module->_internal->binding_associations);
+  SafeFree(p_module->_internal->usage_bindings);
 
   // Free SPIR-V code
   SafeFree(p_module->_internal->spirv_code);
