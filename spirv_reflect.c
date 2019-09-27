@@ -944,11 +944,11 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
       ++(p_parser->type_count);
     }
 
-    p_parser->sampled_image_count = sampled_image_index;
-
     spirv_word_index += node_word_count;
     ++node_index;
   }
+
+  p_parser->sampled_image_count = sampled_image_index;
 
   return SPV_REFLECT_RESULT_SUCCESS;
 }
@@ -1821,7 +1821,7 @@ static SpvReflectResult ParseSamplerImageUsage(Parser* p_parser, SpvReflectShade
   // Allocate container for binding associations
   BindingAssociation* associations = NULL;
   size_t association_count = 0;
-  const size_t max_association_count = p_parser->sampler_count;
+  const size_t max_association_count = p_parser->sampled_image_count;
   
   p_module->_internal->binding_association_count = 0;
   
@@ -1845,7 +1845,7 @@ static SpvReflectResult ParseSamplerImageUsage(Parser* p_parser, SpvReflectShade
     BindingAssociation* assoc = NULL;
     for (size_t j = 0; j < association_count; ++j) {
       if (associations[j].resource != NULL &&
-        associations[j].resource->spirv_id == p_sampled_image->sampler)
+          associations[j].resource->spirv_id == p_sampled_image->image)
       {
         assoc = &associations[j];
         assoc->usage_binding_count++;
@@ -1861,7 +1861,7 @@ static SpvReflectResult ParseSamplerImageUsage(Parser* p_parser, SpvReflectShade
       assoc->usage_binding_count = 0;
 
       // Find sampler resource 
-      SpvReflectDescriptorBinding* binding = FindDescriptorBinding(p_module, p_sampled_image->sampler);
+      SpvReflectDescriptorBinding* binding = FindDescriptorBinding(p_module, p_sampled_image->image);
       if (binding != NULL) {
         assoc->resource = binding;
         assoc->usage_binding_count++;
@@ -1886,8 +1886,8 @@ static SpvReflectResult ParseSamplerImageUsage(Parser* p_parser, SpvReflectShade
     // Build final sampler-to-texture associations
     for (size_t j = 0; j < p_parser->sampled_image_count; ++j) {
       SampledImage* p_sampled_image = &(p_parser->sampled_images[j]);
-      if (p_sampled_image->sampler == assoc->resource->spirv_id) {
-        SpvReflectDescriptorBinding* binding = FindDescriptorBinding(p_module, p_sampled_image->image);
+      if (p_sampled_image->image == assoc->resource->spirv_id) {
+        SpvReflectDescriptorBinding* binding = FindDescriptorBinding(p_module, p_sampled_image->sampler);
         if (binding != NULL) {
           *p_usage_bindings = binding;
           assoc->resource->usage_binding_count++;

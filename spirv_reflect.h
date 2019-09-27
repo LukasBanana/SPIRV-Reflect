@@ -74,6 +74,9 @@ typedef enum SpvReflectResult {
   SPV_REFLECT_RESULT_ERROR_SPIRV_INVALID_BLOCK_MEMBER_REFERENCE,
 } SpvReflectResult;
 
+/*! @enum SpvReflectReturnFlagBits
+
+*/
 typedef enum SpvReflectReturnFlagBits {
   SPV_REFLECT_RETURN_FLAG_SAMPLER_IMAGE_USAGE = 0x00000001,
 } SpvReflectReturnFlagBits;
@@ -446,6 +449,7 @@ extern "C" {
  @param  size      Size in bytes of SPIR-V code.
  @param  p_code    Pointer to SPIR-V code.
  @param  p_module  Pointer to an instance of SpvReflectShaderModule.
+ @param  flags     Flags to enable/disable individual reflection passes.
  @return           SPV_REFLECT_RESULT_SUCCESS on success.
 
 */
