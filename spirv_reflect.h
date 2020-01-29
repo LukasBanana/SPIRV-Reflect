@@ -394,6 +394,14 @@ typedef struct SpvReflectEntryPoint {
   uint32_t*                         used_uniforms;
   uint32_t                          used_push_constant_count;
   uint32_t*                         used_push_constants;
+
+  struct {
+    uint32_t                        name;
+  } word_offset;
+  struct {
+    uint32_t                        name;
+  } word_count;
+  uint32_t                          name_length_with_terminator;
 } SpvReflectEntryPoint;
 
 /*! @struct SpvReflectShaderModule
@@ -1282,6 +1290,27 @@ SpvReflectResult spvReflectChangeOutputVariableLocation(
 );
 
 
+/*! @fn spvReflectChangeEntryPointName
+ @brief  Assign a new name to the specified entry point.
+		 In addition to updating the reflection data, this function modifies
+		 the underlying SPIR-V bytecode. The updated code can be retrieved
+		 with spvReflectGetCode().
+		 It is the caller's responsibility to avoid assigning the same
+		 name to multiple entry points.
+ @param  p_module  Pointer to an instance of SpvReflectShaderModule.
+ @param  index     Pointer to the output variable to update.
+ @param  new_name  The new name to assign to the specified entry point.
+ @return           If successful, returns SPV_REFLECT_RESULT_SUCCESS.
+                   Otherwise, the error code indicates the cause of
+                   the failure.
+*/
+SpvReflectResult spvReflectChangeEntryPointName(
+  SpvReflectShaderModule* p_module,
+  uint32_t                index,
+  const char*             new_name
+);
+
+
 /*! @fn spvReflectSourceLanguage
 
  @param  source_lang  The source language code.
@@ -1385,6 +1414,7 @@ public:
   SpvReflectResult ChangeDescriptorSetNumber(const SpvReflectDescriptorSet* p_set, uint32_t new_set_number = SPV_REFLECT_SET_NUMBER_DONT_CHANGE);
   SpvReflectResult ChangeInputVariableLocation(const SpvReflectInterfaceVariable* p_input_variable, uint32_t new_location);
   SpvReflectResult ChangeOutputVariableLocation(const SpvReflectInterfaceVariable* p_output_variable, uint32_t new_location);
+  SpvReflectResult ChangeEntryPointName(uint32_t index, const char* new_name);
 
 private:
   mutable SpvReflectResult  m_result = SPV_REFLECT_RESULT_NOT_READY;
@@ -2067,6 +2097,22 @@ inline SpvReflectResult ShaderModule::ChangeOutputVariableLocation(
     &m_module,
     p_output_variable,
     new_location);
+}
+
+/*! @fn ChangeEntryPointName
+
+  @param  index
+  @param  new_name
+  @return
+
+ */
+
+inline SpvReflectResult ShaderModule::ChangeEntryPointName(uint32_t index, const char* new_name)
+{
+  return spvReflectChangeEntryPointName(
+    &m_module,
+    index,
+    new_name);
 }
 
 } // namespace spv_reflect

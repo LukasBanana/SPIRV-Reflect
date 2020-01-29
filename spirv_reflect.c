@@ -134,6 +134,7 @@ typedef struct SampledImage {
 // clang-format off
 typedef struct Node {
   uint32_t              result_id;
+  uint32_t              target_id; // Only for OpEntryPoint and OpName
   SpvOp                 op;
   uint32_t              result_type_id;
   uint32_t              type_id;
@@ -566,15 +567,19 @@ static void DestroyParser(Parser* p_parser)
     }
 
     // Free functions
-    for (size_t i = 0; i < p_parser->function_count; ++i) {
-      SafeFree(p_parser->functions[i].callees);
-      SafeFree(p_parser->functions[i].callee_ptrs);
-      SafeFree(p_parser->functions[i].accessed_ptrs);
+    if (p_parser->functions != NULL) {
+      for (size_t i = 0; i < p_parser->function_count; ++i) {
+        SafeFree(p_parser->functions[i].callees);
+        SafeFree(p_parser->functions[i].callee_ptrs);
+        SafeFree(p_parser->functions[i].accessed_ptrs);
+      }
     }
 
     // Free access chains
-    for (uint32_t i = 0; i < p_parser->access_chain_count; ++i) {
-      SafeFree(p_parser->access_chains[i].indexes);
+    if (p_parser->access_chains != NULL) {
+      for (uint32_t i = 0; i < p_parser->access_chain_count; ++i) {
+        SafeFree(p_parser->access_chains[i].indexes);
+      }
     }
 
     SafeFree(p_parser->nodes);
@@ -711,15 +716,21 @@ static SpvReflectResult ParseNodes(Parser* p_parser)
 
       case SpvOpEntryPoint: {
         ++(p_parser->entry_point_count);
+        CHECKED_READU32(p_parser, p_node->word_offset + 1, p_node->target_id);
       }
       break;
 
       case SpvOpName:
+      {
+        CHECKED_READU32(p_parser, p_node->word_offset + 1, p_node->target_id);
+        p_node->name = (const char*)(p_parser->spirv_code + p_node->word_offset + 2);
+      }
+      break;
+
       case SpvOpMemberName:
       {
-        uint32_t member_offset = (p_node->op == SpvOpMemberName) ? 1 : 0;
-        uint32_t name_start = p_node->word_offset + member_offset + 2;
-        p_node->name = (const char*)(p_parser->spirv_code + name_start);
+        //CHECKED_READU32(p_parser, p_node->word_offset + 1, p_node->type_id);
+        p_node->name = (const char*)(p_parser->spirv_code + p_node->word_offset + 3);
       }
       break;
 
@@ -3019,13 +3030,16 @@ static SpvReflectResult ParseEntryPoints(Parser* p_parser, SpvReflectShaderModul
     ++entry_point_index;
 
     // Name length is required to calculate next operand
-    uint32_t name_start_word_offset = 3;
+    const uint32_t name_start_word_offset = 3;
     uint32_t name_length_with_terminator = 0;
     result = ReadStr(p_parser, p_node->word_offset + name_start_word_offset, 0, p_node->word_count, &name_length_with_terminator, NULL);
     if (result != SPV_REFLECT_RESULT_SUCCESS) {
       return result;
     }
-    p_entry_point->name = (const char*)(p_parser->spirv_code + p_node->word_offset + name_start_word_offset);
+    p_entry_point->word_offset.name = p_node->word_offset + name_start_word_offset;
+    p_entry_point->word_count.name = p_node->word_count;
+    p_entry_point->name_length_with_terminator = name_length_with_terminator;
+    p_entry_point->name = (const char*)(p_parser->spirv_code + p_entry_point->word_offset.name);
 
     uint32_t name_word_count = RoundUp(name_length_with_terminator, SPIRV_WORD_SIZE) / SPIRV_WORD_SIZE;
     size_t interface_variable_count = (p_node->word_count - (name_start_word_offset + name_word_count));
@@ -3531,7 +3545,7 @@ void spvReflectDestroyShaderModule(SpvReflectShaderModule* p_module)
   // Descriptor set bindings
   for (size_t i = 0; i < p_module->descriptor_set_count; ++i) {
     SpvReflectDescriptorSet* p_set = &p_module->descriptor_sets[i];
-    free(p_set->bindings);
+    SafeFree(p_set->bindings);
   }
 
   // Descriptor binding blocks
@@ -4636,6 +4650,181 @@ SpvReflectResult spvReflectChangeOutputVariableLocation(
     }
   }
   return SPV_REFLECT_RESULT_ERROR_ELEMENT_NOT_FOUND;
+}
+
+static SpvReflectResult ChangeEntryPointName(
+  SpvReflectShaderModule* p_module,
+  SpvReflectEntryPoint*   p_entry_point,
+  const char*             new_name
+)
+{
+  // Determine word count for new name
+  SpvReflectResult result = SPV_REFLECT_RESULT_SUCCESS;
+
+  const uint32_t num_header_words = 5;
+  const uint32_t opname_string_offset = 2;
+  const uint32_t opentry_string_offset = 3;
+  const uint32_t new_name_len_with_terminator = (uint32_t)strlen(new_name) + 1;
+  const uint32_t new_name_word_count = (new_name_len_with_terminator + SPIRV_WORD_SIZE - 1) / SPIRV_WORD_SIZE;
+  const uint32_t old_name_word_count = (p_entry_point->name_length_with_terminator + SPIRV_WORD_SIZE - 1) / SPIRV_WORD_SIZE;
+  const uint32_t num_trailing_zeros = (new_name_word_count * SPIRV_WORD_SIZE - new_name_len_with_terminator);
+
+  // Determine how many OpName instructions must be patched alongside the OpEntryPoint instruction
+  uint32_t num_opnames = 0;
+  Parser parser = { 0 };
+
+  result = CreateParser(p_module->_internal->spirv_size, p_module->_internal->spirv_code, &parser);
+  if (result != SPV_REFLECT_RESULT_SUCCESS) {
+    return result;
+  }
+
+  result = ParseNodes(&parser);
+  if (result != SPV_REFLECT_RESULT_SUCCESS) {
+    return result;
+  }
+
+  for (size_t i = 0; i < parser.node_count; ++i) {
+    Node* p_node = &(parser.nodes[i]);
+    if (p_node->op == SpvOpName && p_node->target_id == p_entry_point->id) {
+      ++num_opnames;
+    }
+  }
+
+  if (new_name_word_count != old_name_word_count) {
+    // Change size of SPIR-V module by N x M words,
+    // where N is the difference in number of words for a single string literal of the entry point name,
+    // and M is the number of OpName and OpEntryPoint instructions that refer to the same entry point
+    const int32_t word_count_diff = ((int32_t)new_name_word_count) - ((int32_t)old_name_word_count);
+    const int32_t spirv_size_diff = word_count_diff * SPIRV_WORD_SIZE * (1 + num_opnames);
+
+    const size_t new_spirv_size = p_module->_internal->spirv_size + spirv_size_diff;
+    uint32_t* new_spirv = (uint32_t*)calloc(1, new_spirv_size);
+
+    const uint32_t* p_spirv_src = p_module->_internal->spirv_code;
+    uint32_t* p_spirv_dst = new_spirv;
+
+    // Copy SPIR-V header
+    {
+      memcpy(p_spirv_dst, p_spirv_src, num_header_words * SPIRV_WORD_SIZE);
+      p_spirv_src += num_header_words;
+      p_spirv_dst += num_header_words;
+    }
+
+    // Iterate over all instructions and shrink or increase the size of
+    // OpName and OpEntryPoint instructions that refer to the specified entry point
+    for (size_t i = 0; i < parser.node_count; ++i) {
+      Node* p_node = &(parser.nodes[i]);
+      if ((p_node->op == SpvOpEntryPoint && p_node->target_id == p_entry_point->id) ||
+          (p_node->op == SpvOpName && p_node->target_id == p_entry_point->id))
+      {
+        // Determine offsets depending on instruction
+        const uint32_t string_offset = (p_node->op == SpvOpEntryPoint ? opentry_string_offset : opname_string_offset);
+
+        // Copy old instruction prologue
+        memcpy(
+          p_spirv_dst,
+          p_spirv_src,
+          string_offset * SPIRV_WORD_SIZE
+        );
+
+        // Copy new string literal
+        memcpy(
+          p_spirv_dst + string_offset,
+          new_name,
+          new_name_len_with_terminator
+        );
+
+        // Copy new string trailing zeros
+        memset(
+          (char*)(p_spirv_dst + string_offset) + new_name_len_with_terminator,
+          0,
+          num_trailing_zeros
+        );
+
+        // Copy old instruction epilogue
+        memcpy(
+          p_spirv_dst + string_offset + new_name_word_count,
+          p_spirv_src + string_offset + old_name_word_count,
+          (p_node->word_count - string_offset - old_name_word_count) * SPIRV_WORD_SIZE
+        );
+
+        // Patch word count in OpEntryPoint intrinsic
+        {
+          const uint32_t opword = p_spirv_dst[0];
+          const SpvOp opcode = (SpvOp)(opword & 0xFFFF);
+          const uint32_t old_opword_count = ((opword >> 16) & 0xFFFF);
+          const uint32_t new_opword_count = old_opword_count + word_count_diff;
+          p_spirv_dst[0] = ((new_opword_count << 16) | opcode);
+        }
+
+        // Advance write pointer
+        p_spirv_dst += (p_node->word_count + word_count_diff);
+      } else {
+        // Simply copy instruction
+        memcpy(p_spirv_dst, p_spirv_src, p_node->word_count * SPIRV_WORD_SIZE);
+        p_spirv_dst += p_node->word_count;
+      }
+
+      // Advance read pointer
+      p_spirv_src += p_node->word_count;
+    }
+
+    // Replace old module
+    DestroyParser(&parser);
+    spvReflectDestroyShaderModule(p_module);
+    result = spvReflectCreateShaderModule(new_spirv_size, new_spirv, p_module, 0);
+
+    // Release temporary buffer
+    SafeFree(new_spirv);
+  } else {
+    // Get read/write pointer from module
+    uint32_t* p_spirv = p_module->_internal->spirv_code;
+    p_spirv += num_header_words;
+
+    for (size_t i = 0; i < parser.node_count; ++i) {
+      Node* p_node = &(parser.nodes[i]);
+      if ((p_node->op == SpvOpEntryPoint && p_node->target_id == p_entry_point->id) ||
+          (p_node->op == SpvOpName && p_node->target_id == p_entry_point->id))
+      {
+        // Determine offsets depending on instruction
+        const uint32_t string_offset = (p_node->op == SpvOpEntryPoint ? opentry_string_offset : opname_string_offset);
+
+        // Just copy new name in-place
+        memcpy(p_spirv + string_offset, new_name, new_name_len_with_terminator);
+
+        // Fill trailing zeros into array of words
+        memset((char*)(p_spirv + string_offset) + new_name_len_with_terminator, 0, num_trailing_zeros);
+      }
+
+      // Advance read/write pointer
+      p_spirv += p_node->word_count;
+    }
+    
+    DestroyParser(&parser);
+
+    // Store new attribute for this entry point
+    p_entry_point->name_length_with_terminator = new_name_len_with_terminator;
+  }
+
+  return result;
+}
+
+SpvReflectResult spvReflectChangeEntryPointName(
+	SpvReflectShaderModule* p_module,
+	uint32_t                index,
+	const char*             new_name
+)
+{
+  if (IsNull(p_module)) {
+    return SPV_REFLECT_RESULT_ERROR_NULL_POINTER;
+  }
+  if (IsNull(new_name)) {
+    return SPV_REFLECT_RESULT_ERROR_NULL_POINTER;
+  }
+  if (index >= p_module->entry_point_count) {
+    return SPV_REFLECT_RESULT_ERROR_RANGE_EXCEEDED;
+  }
+  return ChangeEntryPointName(p_module, &p_module->entry_points[index], new_name);
 }
 
 const char* spvReflectSourceLanguage(SpvSourceLanguage source_lang)
